@@ -716,12 +716,12 @@ model {
 
   lambda ~ dgamma(0.001, 0.001)
 }
-", file = "exponential_intercept.jags")
+", file = "Exponential Models/exponential_intercept.jags")
 ```
 
 ```{r}
 # Run model
-model = jags.model("exponential_intercept.jags", data = exp_baseline_data, n.chains = 3)
+model = jags.model("Exponential Models/exponential_intercept.jags", data = exp_baseline_data, n.chains = 3)
 update(model, 1000)
 exp_baseline_samples = coda.samples(model, variable.names = "lambda", n.iter = 5000)
 
@@ -1016,11 +1016,11 @@ model {
     beta[j] ~ dnorm(0, 0.01)
   }
 }
-", file = "exponential_aft.jags")
+", file = "Exponential Models/exponential_aft.jags")
 ```
 
 ```{r}
-model = jags.model("exponential_aft.jags", data = exp_AFT_celltypes_data, n.chains = 3, n.adapt = 1000)
+model = jags.model("Exponential Models/exponential_aft.jags", data = exp_AFT_celltypes_data, n.chains = 3, n.adapt = 1000)
 update(model, 1000)
 exp_AFT_celltypes_samples = coda.samples(model, c("beta"), n.iter = 5000)
 summary(exp_AFT_celltypes_samples)
@@ -1239,11 +1239,11 @@ model {
     beta[j] ~ dnorm(0, 0.01)
   }
 }
-", file = "exponential_aft_censored.jags")
+", file = "Exponential Models/exponential_aft_censored.jags")
 ```
 
 ```{r}
-model = jags.model("exponential_aft_censored.jags", data = exp_data_complete_AFT,
+model = jags.model("Exponential Models/exponential_aft_censored.jags", data = exp_data_complete_AFT,
                     n.chains = 3, n.adapt = 1000)
 update(model, 1000)
 exp_complete_AFT_samples = coda.samples(model, variable.names = c("beta"), n.iter = 5000)
@@ -1595,7 +1595,7 @@ model {
   shape ~ dgamma(1, 0.1)
   scale ~ dgamma(1, 0.01)
 }
-", file = "weibull_intercept.jags")
+", file = "Weibull Models/weibull_intercept.jags")
 
 # Since we want to model censored observations, we have to treat t[i] as a data node
 
@@ -1604,7 +1604,7 @@ model {
 
 ```{r}
 #run the model
-model = jags.model("weibull_intercept.jags", data = weibull_data_baseline, n.chains = 3, n.adapt = 1000)
+model = jags.model("Weibull Models/weibull_intercept.jags", data = weibull_data_baseline, n.chains = 3, n.adapt = 1000)
 update(model, 1000)  # Burn-in
 samples_weibull_baseline = coda.samples(model, variable.names = c("shape", "scale"), n.iter = 5000)
 summary(samples_weibull_baseline)
@@ -1871,12 +1871,12 @@ model {
 
   shape ~ dgamma(1, 0.1)
 }
-", file = "weibull_aft_celltype.jags")
+", file = "Weibull Models/weibull_aft_celltype.jags")
 
 ```
 
 ```{r}
-model = jags.model("weibull_aft_celltype.jags", data = weibull_data_AFT_tumor_type, n.chains = 3, n.adapt = 1000)
+model = jags.model("Weibull Models/weibull_aft_celltype.jags", data = weibull_data_AFT_tumor_type, n.chains = 3, n.adapt = 1000)
 update(model, 1000)  
 samples_weibull_AFT_tumor_type = coda.samples(model, variable.names = c("beta", "shape"), n.iter = 5000)
 summary(samples_weibull_AFT_tumor_type)
@@ -2086,11 +2086,11 @@ model {
 
   shape ~ dgamma(1, 0.1)
 }
-", file = "weibull_aft_fullcov_nocensor.jags")
+", file = "Weibull Models/weibull_aft_fullcov_nocensor.jags")
 ```
 
 ```{r}
-model = jags.model("weibull_aft_fullcov_nocensor.jags", data = weibull_data_nocensor, n.chains = 3, n.adapt = 1000)
+model = jags.model("Weibull Models/weibull_aft_fullcov_nocensor.jags", data = weibull_data_nocensor, n.chains = 3, n.adapt = 1000)
 update(model, 1000)
 samples_weibull_nocensor = coda.samples(model, variable.names = c("beta", "shape"), n.iter = 5000)
 summary(samples_weibull_nocensor)
@@ -2493,7 +2493,7 @@ model {
   tau = pow(1 / shape, 2)          # So SD = 1/shape (=> variance = 1/shape²)
   shape ~ dunif(0.1, 10)            # Weak prior on shape
 }
-", file = "weibull_nocensor.bug")
+", file = "Simulation Models/weibull_nocensor.bug")
 ```
 
 4. We then fit the **same Bayesian model structure** back to the simulated data using JAGS.
@@ -2503,7 +2503,7 @@ inits = function() {
   list(beta = rep(0, data_jags_sim$P))
 }
 
-model_sim = jags.model("weibull_nocensor.bug", data = data_jags_sim, inits = inits, n.chains = 3, n.adapt = 1000)
+model_sim = jags.model("Simulation Models/weibull_nocensor.bug", data = data_jags_sim, inits = inits, n.chains = 3, n.adapt = 1000)
 update(model_sim, 1000)
 samples_sim = coda.samples(model_sim, variable.names = c("beta", "shape"), n.iter = 5000)
 ```
@@ -2680,7 +2680,7 @@ model {
   tau = pow(1 / shape, 2)
   shape ~ dunif(0.1, 10)
 }
-", file = "weibull_recovery.bug")
+", file = "Simulation Models/weibull_recovery.bug")
 
 ```
 
@@ -2689,7 +2689,7 @@ inits2 = function() {
   list(beta = rep(0, data_jags_sim2$P))
 }
 
-model_sim2 = jags.model("weibull_recovery.bug", data = data_jags_sim2, inits = inits2,
+model_sim2 = jags.model("Simulation Models/weibull_recovery.bug", data = data_jags_sim2, inits = inits2,
                          n.chains = 3, n.adapt = 1000)
 update(model_sim2, 1000)
 samples_sim2 = coda.samples(model_sim2, variable.names = c("beta", "shape"), n.iter = 5000)
