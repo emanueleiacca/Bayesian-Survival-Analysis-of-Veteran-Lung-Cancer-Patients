@@ -1,0 +1,2197 @@
+---
+title: "Bayesian Survival Analysis of Veteran Lung Cancer Patients: A Comparison of Weibull and Exponential Models"
+author: "Emanuele Iaccarino"
+date: "2025-06-19"
+output: html_document
+---
+
+
+```{r}
+# install.packages(c("rjags", "coda", "survival", "survminer"))
+```
+
+```{r}
+library(rjags)
+library(coda)
+library(survival)
+library(survminer)
+library(ggplot2)
+```
+
+```{r}
+set.seed(22)
+```
+
+### Data Understanding and Exploration
+
+```{r}
+data(cancer, package="survival")
+str(veteran)
+# summary(veteran)
+head(veteran)
+```
+
+| Variable   | Description                                |
+| ---------- | ------------------------------------------ |
+| `trt`      | Treatment group (1 = standard, 2 = test)   |
+| `celltype` | Tumor cell type (factor with 4 categories) |
+| `time`     | Survival time in days                      |
+| `status`   | 1 = dead, 2 = censored                     |
+| `karno`    | Karnofsky performance score                |
+| `diagtime` | Time from diagnosis to randomization       |
+| `age`      | Age in years                               |
+| `prior`    | Prior therapy (0 = no, 10 = yes)           |
+
+
+##### Full variable summary
+
+```{r}
+# Some little pre-processing
+veteran$status <- ifelse(veteran$status == 1, 1, 0)  # 1 = death, 0 = censored
+veteran$trt <- factor(veteran$trt, labels = c("standard", "test"))
+veteran$celltype <- factor(veteran$celltype)
+veteran$prior <- factor(veteran$prior, labels = c("no", "yes"))
+```
+
+##### Distributions for numeric variables
+
+```{r}
+numeric_vars <- c("time", "karno", "diagtime", "age")
+
+par(mfrow = c(2, 2))
+for (var in numeric_vars) {
+  hist(veteran[[var]],
+       main = paste("Histogram of", var),
+       xlab = var,
+       col = "lightblue",
+       border = "white")
+}
+par(mfrow = c(1, 1))
+
+```
+
+```{r}
+summary(veteran[numeric_vars])
+```
+
+**time** – Survival Time
+
+- Highly right-skewed: most patients died early, with few surviving past 500 days  
+- **Median = 80**, **Mean = 121.6**, **Max = 999**
+
+
+- Justifies use of **Weibull** or **Exponential** model: time-to-event is positive and skewed  
+
+**karno** – Karnofsky Score (Performance Status)
+
+- Fairly symmetric, concentrated between 40–80  
+
+- **Median = 60**, **Mean ≈ 58.5**
+
+- Higher score = better physical status → likely important for survival  
+
+**diagtime** – Time from Diagnosis to Randomization
+
+- Very skewed, concentrated between 1–10  
+
+- **Mean = 8.8**, **Max = 87**
+
+- Might capture early vs late enrollment  
+
+**age**– Age in Years
+
+- Mostly 50–70 years, slight right skew  
+
+- **Median = 62**, **Mean ≈ 58.3**
+
+- Older age usually = worse survival  
+
+---
+
+##### Frequency Tables for Categorical Variables
+
+```{r}
+table(veteran$trt)
+table(veteran$celltype)
+table(veteran$prior)
+```
+
+```{r}
+ggplot(veteran, aes(x = celltype)) +
+  geom_bar(fill = "skyblue") +
+  labs(title = "Tumor Cell Type Distribution", x = "Cell Type", y = "Count") +
+  theme_minimal()
+
+ggplot(veteran, aes(x = trt)) +
+  geom_bar(fill = "coral") +
+  labs(title = "Treatment Group Distribution", x = "Treatment", y = "Count") +
+  theme_minimal()
+
+ggplot(veteran, aes(x = prior)) +
+  geom_bar(fill = "lightgreen") +
+  labs(title = "Prior Therapy", x = "Prior Therapy", y = "Count") +
+  theme_minimal()
+
+```
+
+---
+
+##### Event/Censoring Breakdown
+
+```{r}
+ggplot(veteran, aes(x = factor(status, labels = c("Censored", "Dead")))) +
+  geom_bar(fill = "grey") +
+  labs(title = "Event Status", x = "Status", y = "Count") +
+  theme_minimal()
+
+```
+
+**status**– Event Indicator
+
+- Deaths: 128 (**93.4%**)  
+
+- Censored: 9 (**6.6%**)  
+
+### Consideration after EDA
+
+After conducting exploratory data analysis (EDA) on the Veteran Lung Cancer dataset, several key observations were founded:
+
+- The main outcome of interest is **time until death**, not just whether or not the patient died.
+
+- Some patients are **still alive at the end of the study**, meaning their exact survival time is unknown. This is called **right censoring**.
+
+- Survival differs across groups (e.g., tumor `celltype`), and we want to **quantify and compare** these differences.
+
+These patterns tell us that a traditional linear regression or even a classification model is **not appropriate**.
+
+
+---
+
+##### Why Not Linear Models?
+
+Linear regression fails for time-to-event data because:
+
+- It assumes the outcome (survival time) is **normally distributed**, but survival times are strictly **positive** and **right-skewed**
+
+- It cannot properly handle **censored observations**, since It treats death and censoring as **equal outcomes**, which is incorrect
+
+Also we need a method that can provide **estimates over time**, not just at a single moment!
+
+---
+
+##### This Leads Us to Survival Analysis
+
+**Survival analysis** is a set of statistical methods designed specifically for:
+
+- Modeling **time until an event** (e.g., death, relapse, machine failure)
+
+- Dealing with **right-censored data**
+
+- Estimating the **survival function**: the probability of surviving past time $t$
+
+It allows us to answer critical questions like:
+
+- What proportion of patients are still alive after 100 days?
+
+- Which tumor types are associated with longer survival?
+
+- Does treatment affect time-to-death?
+
+---
+
+> Before we impose any assumptions or fit parametric models (like Weibull or exponential), we want to **let the data speak for itself**.
+
+---
+
+## The Kaplan–Meier Estimator
+
+The **Kaplan–Meier estimator** is the gold standard for doing this because:
+
+- It gives a **model-free estimate** of the survival function
+
+- It naturally accommodates **censoring**
+
+- It provides an intuitive **stepwise survival curve**
+
+- It allows us to **visually and statistically compare groups** (e.g., tumor types)
+
+##### Theorical BackGround
+
+The **Kaplan–Meier estimator** is a nonparametric method to estimate the **survival function** $S(t)$, which gives the probability of surviving beyond time $t$:
+$$
+S(t) = P(T > t)
+$$
+
+It does **not assume any distribution** for survival times and handles **right-censored data** gracefully.
+
+**How it works:**
+
+We observe $n$ individuals. For each person $i$, we know:
+
+- $t_i$: time of event or censoring
+
+- $\delta_i$: event indicator (1 = event occurred, 0 = right-censored)
+
+We order the observed **event times** (excluding censored) as $t_{(1)} < t_{(2)} < \cdots < t_{(m)}$
+
+For each event time $t_j$:
+
+- $d_j$: number of events (deaths) at $t_j$
+
+- $n_j$: number of individuals **at risk** just before $t_j$
+
+The Kaplan–Meier estimator is:
+$$
+\hat{S}(t) = \prod_{t_j \leq t} \left(1 - \frac{d_j}{n_j} \right)
+$$
+
+Each term $1 - \frac{d_j}{n_j}$ estimates the **conditional probability of surviving past $t_j$**, given survival up to $t_j$.
+
+---
+
+**Key Properties:**
+
+- **Step function**: The survival curve decreases only at event times.
+
+- **Right-censoring is allowed**: Individuals who are censored still contribute to the risk set $n_j$.
+
+- **No assumptions** about the underlying hazard function.
+
+### Analysis by Treatment Group
+
+```{r step2-km-logrank, message=FALSE, warning=FALSE}
+library(survival)
+library(survminer)
+
+# Survival object
+surv_obj <- Surv(time = veteran$time, event = veteran$status) # that we gonna use in every fit
+
+# Fit KM by treatment
+fit_trt <- survfit(surv_obj ~ trt, data = veteran) 
+
+# Plot KM with:
+ggsurvplot(
+  fit_trt,
+  data = veteran,
+  censor = TRUE,
+  pval = TRUE, # adds log-rank p-value automatically
+  conf.int = TRUE, # Confidence Bands
+  palette = c("#E64B35", "#4DBBD5"),
+  legend.labs = c("Standard Treatment", "Test Drug"),
+  legend.title = "Group",
+  title = "Kaplan–Meier Survival by Treatment Group",
+  xlab = "Time (days)",
+  ylab = "Estimated Survival Probability",
+  ggtheme = theme_minimal()
+)
+```
+
+**Read the plot:**
+
+- The **Y-axis** shows $\hat{S}(t)$, the estimated probability of surviving past time $t$
+
+- Each **drop** occurs at an event (e.g., death)
+
+- **Flat sections** indicate no events occurred
+
+- **Censoring** is shown with a small **vertical tick** on the curve
+
+**Interpretate the plot**
+
+The Kaplan–Meier plot above compares the survival experiences of patients in the **Standard Treatment** group (red) and the **Test Drug** group (blue).
+
+- **Both groups experience rapid early decline in survival probability** — more than half of patients in each group die within the first ~150 days.
+
+- The **curves are very close together** throughout the entire time horizon, with substantial overlap in their confidence bands (shaded regions).
+
+- By 500 days, the estimated survival probability in both groups is near 0, with only a few patients at risk.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+summary_km <- summary(fit_trt, times = c(0, 10, 50, 100, 250, 500))
+
+risk_table <- data.frame(
+  Time = summary_km$time,
+  Group = summary_km$strata,
+  N_At_Risk = summary_km$n.risk
+)
+
+risk_table$Group <- gsub(".*=", "", risk_table$Group) # Reformat
+
+ggplot(risk_table, aes(x = factor(Time), y = N_At_Risk, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Number at Risk at Selected Time Points",
+    x = "Time (days)",
+    y = "Number at Risk",
+    fill = "Group"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+---
+
+##### Log-Rank Test
+
+The **log-rank test** is used to compare survival curves across multiple groups:
+
+  - **Null hypothesis $H_0$**: All groups have the same survival distribution
+  
+  - The test statistic approximately follows a **chi-squared distribution** with $k - 1$ degrees of freedom (here, $k = 4$, so df = 3)
+  
+  - The test assumes **proportional hazards** (hazards are constant across groups)
+
+```{r}
+lr_treat <- survdiff(surv_obj ~ trt, data = veteran)
+
+# Degrees of freedom = number of groups - 1 
+p_val_treat <- 1 - pchisq(lr_treat$chisq, df = 1)
+p_val_treat
+```
+
+The **log-rank test** yields a p-value of **0.93**, indicating:
+
+  > There is **no statistically significant difference** in survival between the Standard and Test treatment groups.
+
+A p-value this high suggests the **null hypothesis** (that the survival functions are the same) cannot be rejected at any conventional significance level.
+
+---
+
+##### Descriptive statistic of findings
+
+```{r}
+# summary(fit_trt)
+```
+
+It was useful to get the same information we plotted more clearly above
+
+```{r}
+summary(fit_trt)$table
+```
+
+- Patients in the **standard treatment group** survived a median of **103 days**, while those in the **test drug group** had a median of **52.5 days**. However, the **95% confidence intervals overlap**, indicating that the observed difference may not be statistically meaningful.
+
+- The **restricted mean survival time (RMST)** is the average survival time up to the last observed time (truncated mean). Interestingly, the **test group has a higher RMST**, despite having a lower median. This suggests that while most patients in the test group died early, **a few survived much longer**, pulling the mean up. This reflects **skewness** in survival distributions — another reason to consider parametric models.
+
+
+Again, confidence intervals overlap heavily, reinforcing the conclusion from the log-rank test:  
+
+  > ❗ There is **no strong evidence** of a survival difference between treatment groups.
+
+---
+
+The **cumulative hazard function** $H(t)$ tells us:
+> The total accumulated risk of experiencing the event (e.g., death) **up to time $t$**.
+
+It is related to the survival function by:
+$$
+H(t) = -\log(S(t))
+$$
+
+So while Kaplan–Meier plots show **survival probability**, the cumulative hazard plot shows **risk accumulation**.
+
+
+```{r}
+ggsurvplot(
+  fit_trt,
+  data = veteran,
+  censor = TRUE,
+  fun = "cumhaz",
+  conf.int = TRUE,
+  palette = c("#E64B35", "#4DBBD5"),
+  title = "Cumulative Hazard by Treatment Group",
+  xlab = "Time (days)",
+  ylab = "Cumulative Hazard"
+)
+```
+
+This plot **confirms** what we saw in the KM curves:
+
+> No consistent or systematic difference in hazard between groups
+
+Up to ~300 days, both groups accumulate hazard **at a similar rate**. After that point:
+
+  - The Standard group (red) appears to accumulate hazard more rapidly — a steep jump occurs late (~day 550). 
+  - The Test group (blue) flattens out slightly, suggesting **lower late-stage risk**.
+
+> these are likely outliers (as shown by wide CI previously) and here also both curves are largely **overlapping with wide confidence bands**, especially in the tails.
+
+##### Clinical and Modeling Implications
+
+- The relatively **parallel shape** of the curves suggests **proportional hazards might be plausible**, but the lack of divergence means **modeling treatment effect may not improve predictive performance**.
+
+- Any observed differences are likely due to **random variation** rather than true treatment effects.
+
+- Therefore, when we build Bayesian models, **treatment group may not be a necessary covariate**.
+
+### Analysis by Tumor Cell Type
+
+```{r}
+fit_km_cell <- survfit(Surv(time, status) ~ celltype, data = veteran)
+
+ggsurvplot(
+  fit_km_cell,
+  data = veteran,
+  pval = TRUE,
+  conf.int = TRUE,
+  title = "Kaplan–Meier Curves by Tumor Cell Type",
+  ggtheme = theme_minimal()
+)
+```
+
+- **Adeno** and **smallcell** types exhibit the **poorest survival**. Their curves drop sharply within the first ~100 days, with very few surviving long-term.
+
+- **Squamous** shows a more **gradual decline** in survival and maintains the **highest survival probability over time**.
+
+- **Large cell** tumors perform slightly better than adeno/smallcell, but worse than squamous.
+
+```{r}
+summary_km_cell <- summary(fit_km_cell, times = c(0, 10, 50, 100, 250, 500))
+
+
+risk_table <- data.frame(
+  Time = summary_km_cell$time,
+  Group = summary_km_cell$strata,
+  N_At_Risk = summary_km_cell$n.risk
+)
+
+risk_table$Group <- gsub(".*=", "", risk_table$Group)
+
+# Barplot
+ggplot(risk_table, aes(x = factor(Time), y = N_At_Risk, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Number at Risk at Selected Time Points",
+    x = "Time (days)",
+    y = "Number at Risk",
+    fill = "Group"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+##### Log-Rank Test
+
+```{r}
+lr_cell <- survdiff(surv_obj ~ celltype, data = veteran)
+
+# Degrees of freedom = number of groups - 1
+p_val_cell <- 1 - pchisq(lr_cell$chisq, df = 3)
+p_val_cell
+```
+
+- The **log-rank test** comparing these curves yields a **p-value < 0.0001**, indicating:
+
+  > There is **strong evidence** that survival differs across tumor cell types.
+
+This result confirms that **celltype is a significant predictor of survival** and should be included in downstream survival models.
+
+```{r}
+summary(fit_km_cell)$table
+```
+
+- **Squamous cell type** has the **longest survival**:
+
+- **Large cell tumors** also show relatively **favorable survival**:
+
+- In contrast, **smallcell and adeno** types exhibit **much shorter survival**:
+
+```{r}
+# Cumulative hazard plot
+ggsurvplot(
+  fit_km_cell,
+  data = veteran,
+  fun = "cumhaz",
+  conf.int = TRUE,
+  risk.table = FALSE,
+  palette = "Dark2",
+  title = "Cumulative Hazard by Tumor Cell Type",
+  xlab = "Time (days)",
+  ylab = "Cumulative Hazard",
+  legend.title = "Tumor Cell Type"
+)
+```
+
+- The **smallcell** and **adeno** groups exhibit the **fastest hazard accumulation**. Their curves rise steeply, indicating a **rapid increase in the risk of death** early on.
+
+- The **squamous** group has the **slowest hazard accumulation**: Its curve increases gradually and remains lower throughout the time span. This implies a **lower and more stable risk** of death compared to others.
+
+- **Large cell** tumors fall in between
+
+##### Clinical and Modeling Implications
+
+Our findings shows that:
+
+- The **tumor cell type is strongly associated with differential mortality risk**.
+
+- The **shapes of the cumulative hazard curves differ**, suggesting that the **hazard is not constant over time**.
+
+  > This invalidates the exponential model assumption and supports using a **Weibull model**, which can capture increasing or decreasing hazards.
+  
+The clear separation and different slopes imply that **both the scale and shape of the hazard function vary by group** — ideal for a **parametric model with covariate effects**.
+
+### Analysis by Prior Therapy
+
+```{r}
+# Fit survival by prior
+fit_km_prior <- survfit(Surv(time, status) ~ prior, data = veteran)
+
+# Plot KM curves
+ggsurvplot(
+  fit_km_prior,
+  data = veteran,
+  pval = TRUE,
+  conf.int = TRUE,
+  palette = c("#66C2A5", "#FC8D62"),
+  title = "Kaplan–Meier Survival by Prior Therapy",
+  xlab = "Time (days)",
+  ylab = "Estimated Survival Probability",
+  legend.title = "Prior Therapy"
+)
+
+```
+
+- Both groups show **similar early mortality patterns**.
+
+- Survival probabilities decrease quickly in both groups within the first 200 days.
+
+- The **curves overlap heavily**, and the confidence bands (shaded areas) intersect across nearly the entire time span.
+
+
+##### Log-Rank Test
+
+```{r}
+lr_prior <- survdiff(surv_obj ~ prior, data = veteran)
+
+# Degrees of freedom = number of groups - 1
+p_val_prior <- 1 - pchisq(lr_prior$chisq, df = 1)
+p_val_prior
+```
+> ❗ There is **no statistically significant difference** in survival between the two groups.
+
+```{r}
+summary(fit_km_cell)$table
+```
+
+```{r}
+summary_km_prior <- summary(fit_km_prior, times = c(0, 10, 50, 100, 250, 500))
+
+
+risk_table <- data.frame(
+  Time = summary_km_prior$time,
+  Group = summary_km_prior$strata,
+  N_At_Risk = summary_km_prior$n.risk
+)
+
+risk_table$Group <- gsub(".*=", "", risk_table$Group)
+
+# Barplot
+ggplot(risk_table, aes(x = factor(Time), y = N_At_Risk, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(
+    title = "Number at Risk at Selected Time Points",
+    x = "Time (days)",
+    y = "Number at Risk",
+    fill = "Group"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+- Initially, there were more patients in the **"no prior therapy"** group than in the **"yes"** group, reflecting the original data imbalance.
+
+- The decline in numbers over time is **parallel**, indicating **similar follow-up loss and event dynamics** in both groups.
+
+This supports the conclusion that the lack of survival difference is not due to uneven dropout or censoring.
+
+
+```{r}
+ggsurvplot(
+  fit_km_prior,
+  data = veteran,
+  fun = "cumhaz",
+  conf.int = TRUE,
+  palette = c("#66C2A5", "#FC8D62"),
+  title = "Cumulative Hazard by Prior Therapy",
+  xlab = "Time (days)",
+  ylab = "Cumulative Hazard",
+  legend.title = "Prior Therapy"
+)
+```
+
+- The **curves for both groups track closely**, with no major separation.
+
+- Slight late divergence appears (e.g., around 500–1000 days), but the wide confidence intervals make this **statistically insignificant**.
+
+This confirms that **risk patterns are similar** regardless of prior treatment.
+
+##### Clinical and Modeling Implications
+
+There is **no clinical or statistical evidence** to justify including `prior` as a main effect in the Bayesian parametric survival model.
+
+
+## Exponential Survival Model 
+
+##### Theoretical Background
+
+The **Exponential model** is the simplest parametric survival model. It assumes that the time-to-event $T$ follows an exponential distribution:
+
+$$
+T \sim \text{Exponential}(\lambda)
+$$
+
+where $\lambda > 0$ is the **rate parameter**. Alternatively, it can be expressed using the **scale** parameter $\theta = 1/\lambda$.
+
+---
+
+**Key Properties**
+
+- **Survival Function**:
+  $$
+  S(t) = \exp(-\lambda t)
+  $$
+
+- **Hazard Function** (constant hazard):
+  $$
+  h(t) = \lambda
+  $$
+  The hazard does **not depend on time**, which means the model assumes a **constant risk of failure** over time.
+
+- **Density Function**:
+  $$
+  f(t) = \lambda \exp(-\lambda t)
+  $$
+
+- **Cumulative Hazard Function**:
+  $$
+  H(t) = \lambda t
+  $$
+
+- **Mean and Median Survival Time**:
+  $$
+  \text{Mean} = \frac{1}{\lambda}, \quad \text{Median} = \frac{\log(2)}{\lambda}
+  $$
+
+##### Exponential Baseline Model (No Covariates)
+
+```{r}
+# Prepare data
+exp_data <- list(
+  time = veteran$time,
+  N = nrow(veteran)
+)
+```
+
+```{r}
+# Write JAGS model
+cat("
+model {
+  for (i in 1:N) {
+    time[i] ~ dexp(lambda)
+  }
+
+  lambda ~ dgamma(0.001, 0.001)
+}
+", file = "exponential_intercept.jags")
+```
+
+```{r}
+# Run model
+library(rjags)
+model <- jags.model("exponential_intercept.jags", data = exp_data, n.chains = 3)
+update(model, 1000)
+samples <- coda.samples(model, variable.names = "lambda", n.iter = 5000)
+
+# Summary
+summary(samples)
+```
+
+```{r}
+# Extract posterior draws
+lambda_post <- as.matrix(samples)[, "lambda"]
+median_post <- log(2) / lambda_post
+quantile(median_post, probs = c(0.025, 0.5, 0.975))
+```
+This close alignment with the KM estimate suggests that the exponential model gives a reasonable central tendency, even under its strict constant-hazard assumption.
+
+```{r}
+km_fit <- survfit(Surv(time, status) ~ 1, data = veteran)
+km_median <- summary(km_fit)$table["median"]
+
+posterior_median <- log(2) / as.matrix(samples)[, "lambda"]
+
+# Plot histogram
+hist(posterior_median, breaks = 50, main = "Posterior Distribution of Median Survival (Exponential)",
+     xlab = "Median Survival Time (days)", col = "skyblue", border = "white")
+abline(v = median(posterior_median), col = "blue", lwd = 2)
+abline(v = km_median, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c("Posterior Median", "KM Median"), col = c("blue", "red"), lty = c(1,2))
+
+```
+
+Model captures observed central survival tendency
+
+```{r}
+lambda_draws <- as.matrix(samples)[, "lambda"]
+sim_data <- replicate(100, rexp(n = veteran %>% nrow(), rate = sample(lambda_draws, 1)))
+sim_medians <- apply(sim_data, 2, median)
+
+# Compare distribution of simulated medians to observed
+hist(sim_medians, breaks = 40, main = "Posterior Predictive Check", xlab = "Simulated Median Survival")
+abline(v = median(veteran$time[veteran$status == 1]), col = "red", lwd = 2)
+```
+
+No evidence of gross misfit in predictive ability
+
+```{r}
+time_grid <- seq(0, 600, length.out = 200)
+posterior_surv <- sapply(time_grid, function(t) {
+  mean(exp(-as.matrix(samples)[, "lambda"] * t))
+})
+
+plot(time_grid, posterior_surv, type = "l", col = "blue", lwd = 2,
+     ylab = "Survival Probability", xlab = "Time (days)",
+     main = "Posterior Predictive Survival Curve (Exponential)")
+```
+
+survival data exhibits early rapid decline followed by flattening (as seen previously), this constant decay may be too restrictive.
+Real data might require more flexible hazard.
+
+### Convergence Diagnostics
+
+In Bayesian analysis using MCMC, convergence diagnostics assess whether the Markov chains have stabilized and are sampling from the true posterior distribution. These checks are crucial to ensure that posterior summaries (like means, medians, or credible intervals) are reliable.
+
+##### 1. Trace Plots
+
+Trace plots display the sampled values of each parameter across iterations. A well-converged chain will exhibit a "hairy caterpillar" appearance—fluctuating around a constant mean with no apparent trends.
+
+- **Good convergence**: horizontal bands, quick mixing.
+- **Poor convergence**: trends, slow drift, or chains stuck in separate modes.
+
+```{r}
+traceplot(samples)
+```
+
+The plot shows three chains (black, red, green), all fluctuating around a stable mean with no visible trends. This suggests good mixing and convergence.
+
+---
+
+##### 2. Gelman–Rubin Diagnostic ($\hat{R}$ or PSRF)
+
+This diagnostic compares the variance **between chains** to the variance **within chains** for each parameter.
+
+- $\hat{R} \approx 1$: chains have likely converged.
+- $\hat{R} > 1.1$: potential non-convergence or insufficient mixing.
+- Multiple chains are required for this diagnostic to be meaningful.
+
+```{r}
+gelman.diag(samples)
+```
+**Perfect convergence.**
+
+Meaning between-chain and within-chain variances agree, so chains have stabilized
+
+---
+
+##### 3. Autocorrelation
+
+MCMC samples can be correlated, especially if chains move slowly through the posterior. Autocorrelation diagnostics measure how much one sample depends on previous samples.
+
+- **High autocorrelation**: poor mixing and fewer effective samples.
+- **Low autocorrelation**: more efficient sampling and better precision.
+
+```{r}
+autocorr.plot(samples)
+```
+
+- **Very high autocorrelation at lag 1.**
+
+- After that, the autocorrelation drops to ~0, which is okay, but the first spike means samples are strongly correlated.
+
+---
+
+##### 4. Effective Sample Size (ESS)
+
+Because of autocorrelation, the number of effectively independent draws is often much smaller than the number of total MCMC iterations. ESS estimates how many uncorrelated samples the chain provides.
+
+- **High ESS (e.g. > 1000)**: reliable estimates.
+- **Low ESS (e.g. < 200)**: may require more iterations or improved sampling.
+
+```{r}
+effectiveSize(samples)
+```
+it means that the 3 chains over 5000 iterations each (minus burn-in) produced many effectively independent samples
+
+---
+
+> To summarize: chain mixes well despite some autocorrelation
+
+---
+
+### (DIC) Deviance Information Criterion
+
+The **Deviance Information Criterion (DIC)** is a Bayesian model comparison tool that balances model fit and complexity. It is conceptually similar to AIC in the frequentist setting but adapted for use with posterior distributions from MCMC.
+
+DIC is defined as:
+
+$$
+\text{DIC} = \overline{D(\theta)} + p_D
+$$
+
+where:
+
+- $D(\theta) = -2 \log p(y \mid \theta)$ is the **deviance**
+- $\overline{D(\theta)}$ is the **posterior mean deviance**
+- $p_D = \overline{D(\theta)} - D(\overline{\theta})$ is the **effective number of parameters**
+
+An equivalent expression:
+
+$$
+\text{DIC} = 2 \overline{D(\theta)} - D(\overline{\theta})
+$$
+
+---
+
+**Interpretation**
+
+- Lower DIC indicates better expected predictive performance
+- A DIC difference of:
+  - **< 5** → weak evidence
+  - **5–10** → moderate evidence
+  - **> 10** → strong preference for the model with lower DIC
+
+```{r}
+dic_exp <- dic.samples(model, n.iter = 5000)
+dic_exp
+```
+##### Manual DIC 
+
+the automatic DIC calculation  **fails** with the following error:
+
+```{r}
+#Warning: Failed to set mean monitor for pD
+#Support of observed nodes is not fixed
+#Mean deviance: 0
+#Penalty: 0
+#Penalized deviance: 0
+```
+
+This failure happens because **JAGS cannot internally compute the deviance for models with censoring using `dinterval()`** — the likelihood is no longer a standard density like `dexp()` alone, but a **mixture of densities and survival functions**, and JAGS does not know how to compute deviance contributions from that.
+
+To overcome this, we manually compute the **Deviance Information Criterion (DIC)** using the standard formula:
+
+$$
+\text{DIC} = 2 \cdot \overline{D(\theta)} - D(\bar{\theta})
+$$
+
+Where:
+- $\overline{D(\theta)} = -2 \cdot \text{mean log-likelihood over MCMC samples}$
+- $D(\bar{\theta}) = -2 \cdot \text{log-likelihood evaluated at posterior mean}$
+
+For survival data with censoring:
+- If $t_i$ is **uncensored**, the likelihood is:
+
+$$
+f(t_i \mid \lambda_i) = \lambda_i e^{-\lambda_i t_i}
+\quad \Rightarrow \quad \log f(t_i) = \log(\lambda_i) - \lambda_i t_i
+$$
+
+- If $t_i$ is **right-censored**, the likelihood becomes the **survival function**:
+
+$$
+S(t_i \mid \lambda_i) = P(T > t_i) = e^{-\lambda_i t_i}
+\quad \Rightarrow \quad \log S(t_i) = -\lambda_i t_i
+$$
+
+```{r}
+# Estrai i campioni lambda dal modello baseline
+posterior_mat <- as.matrix(samples)
+lambda_samples <- posterior_mat[, "lambda"]
+
+# Calcola la log-verosimiglianza per ogni draw (sample)
+loglik_vector <- sapply(lambda_samples, function(lam) {
+  ll <- ifelse(
+    veteran$status == 1,
+    dexp(veteran$time, rate = lam, log = TRUE),
+    log1p(-pexp(veteran$time, rate = lam))  # censored
+  )
+  sum(ll)
+})
+
+# Media della devianza (D̄)
+D_bar <- -2 * mean(loglik_vector)
+
+# Devianza alla media posteriore di lambda
+lambda_hat <- mean(lambda_samples)
+loglik_hat <- ifelse(
+  veteran$status == 1,
+  dexp(veteran$time, rate = lambda_hat, log = TRUE),
+  log1p(-pexp(veteran$time, rate = lambda_hat))
+)
+D_hat <- -2 * sum(loglik_hat)
+
+# Calcolo DIC
+DIC <- 2 * D_bar - D_hat
+cat("Manual DIC (Baseline Exponential):", DIC, "\n")
+```
+
+### Exponential with Covariates(Tumor cell types)
+
+**Modeling with Covariates: AFT Form**
+
+In the **Accelerated Failure Time (AFT)** form, we model the log of survival time linearly:
+
+$$
+\log(T_i) = \mu_i + \epsilon_i, \quad \epsilon_i \sim \text{Gumbel}(0, 1/\lambda)
+$$
+
+or equivalently,
+
+$$
+T_i \sim \text{Exponential}(\lambda_i), \quad \lambda_i = \exp(-X_i^\top \beta)
+$$
+
+```{r}
+# design matrix for tumor cell type
+# (no intercept to estimate baseline directly)
+#  so each tumor type gets its own coefficient.
+
+X_celltype <- model.matrix(~ celltype - 1, data = veteran)
+exp_data <- list(
+  N = nrow(veteran),
+  time = veteran$time,
+  isCensored = 1 - veteran$status,  # dinterval uses 0 = event, 1 = censored
+  X = X_celltype,
+  K = ncol(X_celltype)
+)
+
+```
+
+```{r}
+cat("
+model {
+  for (i in 1:N) {
+    isCensored[i] ~ dinterval(t[i], time[i])
+    t[i] ~ dexp(lambda[i])
+    log(lambda[i]) <- -inprod(beta[], X[i,]) # # AFT-style linear predictor
+  }
+
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.01)
+  }
+}
+", file = "exponential_aft.jags")
+```
+
+```{r}
+library(rjags)
+
+exp_data$t <- rep(NA, exp_data$N)  # needed for censored modeling
+model <- jags.model("exponential_aft.jags", data = exp_data, n.chains = 3, n.adapt = 1000)
+update(model, 1000)
+samples <- coda.samples(model, c("beta"), n.iter = 5000)
+# summary(samples)
+
+```
+
+```{r}
+median_survival_adeno    <- exp(beta_adeno)
+median_survival_small    <- exp(beta_small)
+median_survival_large    <- exp(beta_large)
+median_survival_squamous <- exp(beta_squamous)
+
+# Extract posterior matrix
+posterior_mat <- as.matrix(samples)
+
+# Compute medians for each iteration
+medians_adeno    <- exp(posterior_mat[, "beta[1]"])
+medians_small    <- exp(posterior_mat[, "beta[2]"])
+medians_large    <- exp(posterior_mat[, "beta[3]"])
+medians_squamous <- exp(posterior_mat[, "beta[4]"])
+
+# Combine and reshape for plotting
+library(tidyr)
+library(dplyr)
+
+median_df <- data.frame(
+  Adeno = medians_adeno,
+  Smallcell = medians_small,
+  Large = medians_large,
+  Squamous = medians_squamous
+) %>%
+  pivot_longer(cols = everything(), names_to = "Celltype", values_to = "MedianSurvival")
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(median_df, aes(x = MedianSurvival, fill = Celltype)) +
+  geom_density(alpha = 0.5) +
+  xlab("Posterior Median Survival (days)") +
+  ggtitle("Posterior Distribution of Median Survival Times by Cell Type (Exponential AFT)") +
+  theme_minimal()
+
+```
+
+- Squamous (purple): Has the shortest predicted survival time — very concentrated leftward. Likely a more aggressive form.
+
+- Large cell (green): Slightly better than squamous but still short survival.
+
+- Adenocarcinoma (red): Moderate survival with a wider spread — more uncertainty but generally better prognosis.
+
+- Small cell (blue): Has the longest predicted survival, with also a wider spread 
+
+
+```{r}
+# Define cell types and beta column mapping
+celltypes <- c("adeno", "smallcell", "large", "squamous")
+beta_cols <- c("beta[1]", "beta[2]", "beta[3]", "beta[4]")
+
+# Loop over cell types
+for (i in seq_along(celltypes)) {
+  
+  group_name <- celltypes[i]
+  beta_col <- beta_cols[i]
+  
+  # Subset data for this group
+  group_data <- subset(veteran, celltype == group_name)  # update 'celltype' if needed
+  
+  # Check there's enough data
+  if (nrow(group_data) < 5) next
+  
+  # KM fit
+  km_fit <- survfit(Surv(time, status) ~ 1, data = group_data)
+  
+  # Posterior lambda from beta
+  lambda_samples <- exp(-posterior_mat[, beta_col])
+  lambda_hat <- mean(lambda_samples)
+  
+  # Time sequence and predictive survival function
+  t_seq <- seq(0, max(group_data$time), by = 1)
+  S_t <- exp(-lambda_hat * t_seq)
+  
+  # Plot
+  plot(km_fit, conf.int = FALSE,
+       main = paste("Posterior Predictive vs KM -", toupper(group_name)),
+       xlab = "Time (days)", ylab = "Survival Probability")
+  lines(t_seq, S_t, col = "blue", lwd = 2)
+  legend("topright", legend = c("KM Curve", "Posterior Predictive"),
+         col = c("black", "blue"), lwd = 2)
+}
+```
+
+The plots show the Kaplan–Meier estimates versus posterior predictive survival curves for each tumor cell type under the Exponential AFT model. While the model fits early survival decline fairly well in all groups, it often underestimates longer-term survival — especially for the squamous and large cell types. This suggests the Exponential model may be too restrictive, motivating a comparison with the more flexible Weibull model.
+
+```{r}
+traceplot(samples)
+```
+
+The trace plots for beta[1] to beta[4] show stable oscillation without drift, indicating that the MCMC chains are well-mixed and exploring the posterior space. There are no signs of non-convergence (e.g., trends or stickiness).
+
+---
+
+```{r}
+gelman.diag(samples)
+```
+All values are very close to 1, which strongly suggests that convergence has been reached across chains. This supports the visual impression from the trace plots,
+
+---
+
+```{r}
+autocorr.plot(samples)
+```
+
+All autocorrelation plots show a sharp drop-off after lag 0, suggesting low autocorrelation. This implies that the MCMC samples are relatively uncorrelated and the chain mixes well.
+
+---
+
+```{r}
+effectiveSize(samples)
+```
+
+The value reported, according to the Rule of thumb: ESS > 1000 is generally considered very good for stable estimation.
+
+---
+
+```{r}
+samples_mat <- as.matrix(samples)
+beta_samples <- samples_mat[, grep("beta\\[", colnames(samples_mat))]
+stopifnot(ncol(X_celltype) == ncol(beta_samples))
+
+loglik_matrix <- sapply(1:nrow(beta_samples), function(s) {
+  eta     <- X_celltype %*% matrix(beta_samples[s, ], ncol = 1)  # FIX HERE
+  lambda  <- exp(-eta)
+  
+  ll <- ifelse(
+    veteran$status == 1,
+    dexp(veteran$time, rate = lambda, log = TRUE),
+    log1p(-pexp(veteran$time, rate = lambda))  # numerically safe log(1 - p)
+  )
+  
+  sum(ll)
+})
+
+mean_loglik <- mean(loglik_matrix)
+D_bar <- -2 * mean_loglik
+
+# Posterior mean deviance
+beta_hat <- colMeans(beta_samples)
+eta_hat  <- X_celltype %*% matrix(beta_hat, ncol = 1)
+lambda_hat <- exp(-eta_hat)
+
+loglik_hat <- ifelse(
+  veteran$status == 1,
+  dexp(veteran$time, rate = lambda_hat, log = TRUE),
+  log1p(-pexp(veteran$time, rate = lambda_hat))
+)
+
+D_hat <- -2 * sum(loglik_hat)
+DIC <- 2 * D_bar - D_hat
+
+cat("Manual DIC:", DIC, "\n")
+```
+
+
+### Exponential model with all covariates
+
+```{r}
+library(survival)
+library(rjags)
+library(coda)
+
+# Model matrix: includes intercept, celltype dummies, and other covariates
+X <- model.matrix(~ celltype + age + karno + diagtime + prior, data = veteran)
+
+# Extract response and censoring info
+time_obs <- veteran$time
+status   <- veteran$status              # 1 = event, 0 = censored
+censor_upper <- ifelse(status == 1, 9999, time_obs)
+
+# Build list for JAGS
+exp_data <- list(
+  N = nrow(veteran),
+  K = ncol(X),
+  X = X,
+  t = time_obs,
+  c = censor_upper,
+  isCensored = status
+)
+```
+
+```{r}
+cat("
+model {
+  for (i in 1:N) {
+    # Linear predictor with all covariates
+    eta[i] <- inprod(beta[], X[i, ])
+    lambda[i] <- exp(-eta[i])
+
+    # Censoring model
+    isCensored[i] ~ dinterval(t[i], c[i])
+    t[i] ~ dexp(lambda[i])
+  }
+
+  # Priors for all regression coefficients
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+}
+", file = "exponential_aft_censored.jags")
+```
+
+```{r}
+# Load and adapt the model
+model <- jags.model("exponential_aft_censored.jags", data = exp_data,
+                    n.chains = 3, n.adapt = 1000)
+
+# Burn-in
+update(model, 1000)
+
+# Draw posterior samples
+samples <- coda.samples(model, variable.names = c("beta"), n.iter = 5000)
+summary(samples)
+```
+
+```{r}
+samples_mat <- as.matrix(samples)
+
+# Extract only beta parameters
+beta_samples <- samples_mat[, grep("beta\\[", colnames(samples_mat))]
+
+# Summarise posterior means and 95% credible intervals
+summary_df <- data.frame(
+  Variable = paste0("beta[", 1:ncol(beta_samples), "]"),
+  Mean = apply(beta_samples, 2, mean),
+  Lower = apply(beta_samples, 2, quantile, probs = 0.025),
+  Upper = apply(beta_samples, 2, quantile, probs = 0.975)
+)
+
+# Optionally relabel with real covariate names if known
+covariate_labels <- c("Intercept (Squamous)",
+                      "Adeno vs Squamous",
+                      "Large vs Squamous",
+                      "Smallcell vs Squamous",
+                      "Age",
+                      "Karnofsky Score",
+                      "Diagnosis Time",
+                      "Prior Therapy")
+summary_df$Covariate <- covariate_labels
+
+# Forest plot
+ggplot(summary_df, aes(x = Mean, y = reorder(Covariate, Mean))) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Posterior Estimates with 95% Credible Intervals",
+    x = "Posterior Mean (log scale effect on hazard)",
+    y = "Covariate"
+  ) +
+  theme_minimal()
+```
+
+> The dashed red line at 0 is the no-effect line; parameters far from this (with CIs not crossing it) are more meaningful.
+
+- All Tumor Cell Type have strong and meaningfull Effects as we have seen during the whole analysis
+
+- Karnofsky Score has a positive coefficient, meaning higher scores (better performance status) are associated with shorter survival, which may seem counterintuitive.
+
+- Age, Diagnosis Time and Prior are nearly centered around 0 so no strong effect detected.
+
+- In Prior Therapy, the CI includes 0, suggesting weak or uncertain evidence for effect
+
+```{r}
+mean_age      <- mean(veteran$age)
+mean_karno    <- mean(veteran$karno)
+mean_diagtime <- mean(veteran$diagtime)
+prior_val     <- 0
+
+X_profiles <- list(
+  "Squamous"   = c(1, 0, 0, 0, mean_age, mean_karno, mean_diagtime, prior_val),
+  "Adeno"      = c(1, 1, 0, 0, mean_age, mean_karno, mean_diagtime, prior_val),
+  "Large"      = c(1, 0, 1, 0, mean_age, mean_karno, mean_diagtime, prior_val),
+  "Smallcell"  = c(1, 0, 0, 1, mean_age, mean_karno, mean_diagtime, prior_val)
+)
+posterior_mat <- as.matrix(samples)
+beta_samples  <- posterior_mat[, grep("beta", colnames(posterior_mat))]
+
+median_df <- lapply(names(X_profiles), function(type) {
+  eta <- beta_samples %*% matrix(X_profiles[[type]], ncol = 1)
+  median_surv <- exp(eta)  # median for exponential AFT
+  data.frame(MedianSurvival = median_surv, Celltype = type)
+}) %>%
+  bind_rows()
+
+ggplot(median_df, aes(x = MedianSurvival, fill = Celltype)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Posterior Distribution of Median Survival by Cell Type (Adjusted for Covariates)",
+    x = "Median Survival Time (days)", y = "Density"
+  ) +
+  theme_minimal()
+
+```
+The model now reflects conditional effects, i.e., “given the same average age, health score, etc", it other words we adjusted for those covariates known to influence survival.
+
+- Adeno shifts downward in survival time once adjusted — suggesting that some of the unadjusted advantage in the first plot might be due to patient characteristics.
+
+- The x-axis has shifted to the right, showing longer survival times:
+
+  - Before adjustment: medians were ~10–60 days.
+
+  - After adjustment: medians now range from ~50 to over 200 days.
+
+```{r}
+# Time grid
+times <- seq(0, 300, by = 5)
+
+# Compute survival probabilities for Squamous at each time for each MCMC draw
+squamous_eta <- beta_samples %*% matrix(X_profiles$"Squamous", ncol = 1)
+lambda <- exp(-squamous_eta)  # individual-specific rate
+
+# For each time, compute survival probability: S(t) = exp(-lambda * t)
+posterior_surv <- sapply(times, function(t) exp(-lambda * t))
+
+# Summarise across MCMC draws (rows): median + 95% CI
+surv_df <- data.frame(
+  time = times,
+  median = apply(posterior_surv, 2, median),
+  lower = apply(posterior_surv, 2, quantile, 0.025),
+  upper = apply(posterior_surv, 2, quantile, 0.975)
+)
+
+# Plot survival curve with credible band
+library(ggplot2)
+ggplot(surv_df, aes(x = time)) +
+  geom_line(aes(y = median), color = "blue", size = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = "blue") +
+  labs(
+    title = "Posterior Predictive Survival Curve (Squamous)",
+    x = "Time (days)", y = "Survival Probability"
+  ) +
+  theme_minimal()
+
+```
+
+Looks more natural then before
+
+```{r}
+library(survival)
+library(survminer)
+library(dplyr)
+
+
+# Loop over cell types
+for (type in names(X_profiles)) {
+  # 1. Compute lambda for simulated patients
+  eta <- beta_samples %*% matrix(X_profiles[[type]], ncol = 1)
+  lambda <- exp(-eta)
+  
+  # 2. Simulate survival times
+  n_sim <- 100
+  sim_lambda <- sample(lambda, n_sim)
+  sim_times <- rexp(n_sim, rate = sim_lambda)
+  sim_df <- data.frame(time = sim_times, status = 1, group = "Simulated")
+  
+  # 3. Get observed data for this group
+  obs_df <- veteran[veteran$celltype == tolower(type), ]
+  obs_df$group <- "Observed"
+  
+  # 4. Combine and plot KM
+  km_data <- bind_rows(
+    data.frame(time = obs_df$time, status = obs_df$status, group = "Observed"),
+    sim_df
+  )
+  
+  fit <- survfit(Surv(time, status) ~ group, data = km_data)
+  
+  print(
+    ggsurvplot(
+      fit, data = km_data,
+      palette = c("black", "steelblue"),
+      conf.int = TRUE,
+      legend.title = "Group",
+      title = paste("Observed vs Simulated Survival:", type),
+      xlab = "Time (days)", ylab = "Survival Probability"
+    )
+  )
+}
+
+```
+
+
+- **Squamous**: The model fits quite well
+
+- **Adeno**: The model overpredicts survival — simulated patients live longer on average than observed.
+Indicates the exponential assumption may be too rigid for early drop-off seen in Adeno.
+
+- **Large**: The model underpredicts survival — simulated patients die earlier.
+Possibly the exponential model can't capture the slower decline in observed survival.
+
+- **Smallcell**: Model fits moderately well, but again a bit optimistic (simulated curve above observed).
+
+```{r}
+traceplot(samples)
+```
+
+```{r}
+gelman.diag(samples)
+```
+
+**Concerning Trace Plot**:
+
+- **beta[1] (Intercept / Squamous baseline)**
+
+  - Trace plot: high variance and visible drift, with poor overlap across chains.
+
+  - Gelman-Rubin PSRF: 1.04 (Upper C.I. = 1.12) → signals lack of convergence.
+
+Posterior uncertainty for baseline survival time is still large, likely due to high variability in the squamous group.
+
+- **beta[5] (Age effect)**
+
+  - Trace plot: sticky behavior, some chains explore different regions.
+
+  - PSRF: 1.03 (Upper C.I. = 1.12) → marginally non-converged.
+
+Age effect on log-survival time is subtle and possibly confounded.
+
+- **beta[6] (Karnofsky score)**
+
+  - Trace plot: higher autocorrelation, chain mixing appears weak.
+
+  - PSRF: 1.01 (Upper C.I. = 1.04) → borderline acceptable but suggests potential inefficiency.
+
+Posterior still converging, but slower than others. Could benefit from more iterations or thinning.
+
+**Well-Converged Parameters:** 
+
+beta[2], beta[3], beta[4], beta[7], beta[8]
+
+These parameters appear to be well-mixed and stationary:
+
+Trace plots are flat and overlapping.
+
+PSRF values are exactly 1.00, indicating strong convergence.
+
+**Multivariate PSRF = 1.03** is marginally acceptable.
+
+This indicates that collectively, the parameters are close to convergence, but some dimensions (like beta[1], beta[5]) need more iterations to achieve reliable joint posterior exploration.
+
+```{r}
+autocorr.plot(samples)
+```
+
+Parameters like beta[1], beta[5], beta[6] exhibit strong autocorrelation even at higher lags.
+
+This suggests that the chain is moving slowly, in fact for those:
+
+
+```{r}
+effectiveSize(samples)
+```
+
+The effective sample size (ESS) is low despite many iterations.
+
+```{r}
+# Converti in matrice e isola i campioni di beta
+posterior_mat <- as.matrix(samples)
+beta_samples <- posterior_mat[, grep("beta", colnames(posterior_mat))]
+
+# Design matrix usata nel modello
+# (ATTENZIONE: deve essere esattamente quella usata per il modello JAGS)
+X_full <- model.matrix(~ celltype + age + karno + diagtime + prior, data = veteran)
+
+# Funzione per log-likelihood con censura
+loglik_sample <- function(beta_vec) {
+  eta <- X_full %*% matrix(beta_vec, ncol = 1)
+  lambda <- exp(-eta)
+  
+  loglik <- ifelse(
+    veteran$status == 1,
+    dexp(veteran$time, rate = lambda, log = TRUE),                     # uncensored
+    log1p(-pexp(veteran$time, rate = lambda))                          # right censored
+  )
+  sum(loglik)
+}
+
+# Calcola la devianza media
+loglik_values <- apply(beta_samples, 1, loglik_sample)
+D_bar <- -2 * mean(loglik_values)
+
+# Calcola la devianza alla media di beta
+beta_hat <- colMeans(beta_samples)
+eta_hat <- X_full %*% matrix(beta_hat, ncol = 1)
+lambda_hat <- exp(-eta_hat)
+
+loglik_hat <- ifelse(
+  veteran$status == 1,
+  dexp(veteran$time, rate = lambda_hat, log = TRUE),
+  log1p(-pexp(veteran$time, rate = lambda_hat))
+)
+D_hat <- -2 * sum(loglik_hat)
+
+# DIC finale
+DIC <- 2 * D_bar - D_hat
+cat("Manual DIC (Exponential AFT with covariates):", DIC, "\n")
+```
+
+
+
+## Weibull Distribution
+
+With Kaplan–Meier we revealed earlier that the **hazard of death is not constant over time** — for most groups, risk increased sharply early and plateaued later. This rules out simplistic models like the **Exponential**, which assume a constant hazard.
+
+> We now move to a more flexible **parametric survival model**: the **Weibull distribution**.
+
+The **Weibull distribution** is a two-parameter distribution commonly used in survival analysis. It generalizes the exponential distribution and allows for **increasing or decreasing hazard rates** depending on the shape parameter.
+
+Let $T$ be the survival time. Then:
+
+- **PDF (density):**
+$$
+f(t \mid \lambda, \kappa) = \kappa \lambda t^{\kappa - 1} \exp(-\lambda t^\kappa)
+$$
+- **Survival function:**
+$$
+S(t \mid \lambda, \kappa) = \exp(-\lambda t^\kappa)
+$$
+- **Hazard function:**
+$$
+h(t) = \frac{f(t)}{S(t)} = \kappa \lambda t^{\kappa - 1}
+$$
+
+- If $\kappa = 1$, the Weibull **reduces to exponential**.
+
+- If $\kappa > 1$, hazard **increases over time** (aging, deterioration).
+
+- If $\kappa < 1$, hazard **decreases** (early failures, treatment effects).
+
+### Parametrization for Regression (AFT Form)
+
+In survival regression, we want to model how covariates affect survival time. We use the **Accelerated Failure Time (AFT)** formulation:
+
+$$
+\log(T_i) = \mu_i + \sigma \varepsilon_i, \quad \varepsilon_i \sim \text{Gumbel}(0,1)
+$$
+
+- $\mu_i = \mathbf{x}_i^\top \beta$ is the linear predictor
+
+- $\sigma = 1/\kappa$ is the scale (inverse of shape)
+
+- This implies:
+$$
+T_i \sim \text{Weibull}(\lambda_i, \kappa), \quad \text{where } \lambda_i = \exp(-\mathbf{x}_i^\top \beta)
+$$
+
+The AFT interpretation: 
+
+> Covariates **accelerate or decelerate** the survival time.
+
+---
+
+##### Censoring in the Weibull Model
+
+We handle right-censoring by modifying the likelihood:
+
+$$
+\mathcal{L}_i =
+\begin{cases}
+f(t_i) & \text{if event occurred (uncensored)} \\
+S(t_i) & \text{if right-censored}
+\end{cases}
+$$
+
+This works cleanly in a **Bayesian setting**, where censoring is naturally incorporated into the **likelihood** and inference is done over full posterior distributions.
+
+### Weibull Model – Intercept-Only (No Covariates)
+
+Before adding predictors, we fit a **simplified Weibull model** that estimates only two global parameters:
+
+- $\kappa$: shape parameter (hazard trend)
+- $\lambda$: scale parameter (inverse of survival)
+
+This **simplified model** is useful to:
+
+- Validate the likelihood/censoring setup
+
+- Understand overall survival behavior
+
+- Serve as a baseline for comparison with more complex models
+
+---
+
+##### Likelihood
+
+Let $T_i \sim \text{Weibull}(\lambda, \kappa)$, then:
+
+- **Density (if death is observed):**
+  $$
+  f(t_i) = \kappa \lambda t_i^{\kappa - 1} \exp(-\lambda t_i^\kappa)
+  $$
+- **Survival function (if censored):**
+  $$
+  S(t_i) = \exp(-\lambda t_i^\kappa)
+  $$
+
+```{r}
+# Prepare data
+weibull_data <- list(
+  time = veteran$time,
+  isCensored = veteran$status,
+  N = nrow(veteran)
+)
+
+```
+
+```{r}
+# Write JAGS model
+cat("
+model {
+  for (i in 1:N) {
+    isCensored[i] ~ dinterval(t[i], time[i])  # Handle censoring
+    t[i] ~ dweib(shape, scale) 
+  }
+
+  # weakly informative priors
+  shape ~ dgamma(1, 0.1)
+  scale ~ dgamma(1, 0.01)
+}
+", file = "weibull_intercept.jags")
+
+# Since we want to model censored observations, we have to treat t[i] as a data node
+
+# dweib() has a built-in censoring using dinterval() for right-censored data
+```
+
+```{r}
+weibull_data$isCensored <- veteran$status  # 1 = event, 0 = censored
+
+#run the model
+library(rjags)
+model <- jags.model("weibull_intercept.jags", data = weibull_data, n.chains = 3, n.adapt = 1000)
+update(model, 1000)  # Burn-in
+samples <- coda.samples(model, variable.names = c("shape", "scale"), n.iter = 5000)
+summary(samples)
+
+```
+
+**Shape Parameter < 1 → Decreasing Hazard Rate**
+
+The **Weibull shape parameter** governs how the hazard rate (instantaneous risk of death) changes over time.
+
+In our posterior:
+
+- Posterior mean for shape = **0.33**
+- 95% credible interval lies **entirely below 1**
+
+**Conclusion(in clinical terms)**: The data strongly support a **decreasing hazard**, suggesting that **most patients die early**, and those who survive initial periods have improving chances over time.
+This is consistent with what we saw in Kaplan–Meier analysis.
+
+---
+
+##### Median Survival Time
+
+The **scale parameter** affects the **horizontal stretching** of the survival curve and is directly involved in determining the median survival time:
+
+The formula for the Weibull median is:
+
+$$
+\text{Median} = \lambda \cdot (\log 2)^{1/\alpha}
+$$
+
+Where:
+- $\lambda$ = scale
+- $\alpha$ = shape
+$$
+\text{Median} \approx 0.0233 \cdot (\log 2)^{1 / 0.3288} \approx 0.0233 \cdot (0.6931)^{3.042} \approx 0.00152
+$$
+
+```{r}
+scale = 0.0233
+shape = 0.3288
+
+median_est <- scale * (log(2))^(1 / shape) 
+median_est  
+```
+This is on the **log-transformed time scale**, so we must **back-transform**:
+
+```{r}
+exp(median_est)
+```
+This is extremely low, which signals two key issues:
+
+- The model currently has no covariates, so it treats all patients as identical and fails to explain survival heterogeneity.
+
+- The median is heavily biased by extreme early deaths and skewed time distributions, leading to a misleading central estimate.
+
+```{r}
+# install.packages("bayesplot")
+library(bayesplot)
+posterior_mat <- as.matrix(samples)
+
+bayesplot::mcmc_areas(posterior_mat, pars = c("shape", "scale"),
+           prob = 0.95) +
+  ggtitle("Posterior Distributions for Shape and Scale (Weibull)")
+
+```
+
+
+**Shape Parameter**
+
+- The **posterior distribution of the shape parameter** is concentrated **well below 1**, with most density around **0.3–0.4**.
+
+- The **long right tail** of the distribution indicates some posterior uncertainty, but the mass is clearly concentrated in the decreasing-hazard region ($\alpha < 1$).
+
+**Scale Parameter**:
+
+- The **posterior for scale** is sharply peaked near zero, with most of the probability mass between **0 and 0.05**. This leads to the
+**unrealistically low median survival** estimates (as seen previously).
+
+- This reflects the **compressing effect** of the intercept-only model: since no covariates are included, the model compensates by squeezing the scale to explain rapid early deaths. The peakedness indicates the model is very confident in this (possibly misspecified) value — a classic sign that the model is too rigid
+
+```{r}
+# Extract posterior means
+post_mean <- summary(samples)$statistics[, "Mean"]
+shape_hat <- post_mean["shape"]
+scale_hat <- post_mean["scale"]
+
+# Survival function: S(t) = exp(-(lambda * t)^shape)
+t_vals <- seq(0, 1000, length.out = 200)
+S_vals <- exp(-(scale_hat * t_vals)^shape_hat)
+
+plot(t_vals, S_vals, type = "l", lwd = 2, col = "blue",
+     xlab = "Time (days)", ylab = "Survival Probability",
+     main = "Fitted Weibull Survival Curve (No Covariates)")
+
+```
+
+This is the **baseline survival** across all patients (No covariates included). The model-implied survival function confirms what Kaplan–Meier had shown: **rapid early decline**
+
+```{r}
+# Sample 500 shape/scale combinations
+shape_samp <- posterior_mat[, "shape"]
+scale_samp <- posterior_mat[, "scale"]
+n_sim <- 500
+sim_t <- numeric(n_sim)
+
+for (i in 1:n_sim) {
+  sim_t[i] <- rweibull(1, shape = shape_samp[i], scale = 1/scale_samp[i])  # JAGS uses reparam with 1/scale
+}
+
+hist(sim_t, breaks = 50, col = "skyblue", main = "Posterior Predictive Survival Times",
+     xlab = "Simulated survival time (days)")
+
+```
+
+The **distribution is extremely right-skewed**, with some simulations resulting in **implausibly high survival times**.
+This inflation is due to sampling very **small `scale` values** combined with **`shape < 1`**, which yields a **long tail** (mathematically consistent but unrealistic).
+
+```{r}
+# install.packages("extraDistr")
+library(extraDistr)
+posterior_df <- as.data.frame(posterior_mat)
+
+posterior_df$mean_surv <- (1 / posterior_df$scale) * gamma(1 + 1 / posterior_df$shape)
+
+summary(posterior_df$mean_surv)
+```
+
+- The **mean and max survival time are unreliable** — dominated by rare extreme draws from the posterior (due to heavy tail) -> **Median survival** and early quantiles are more informative and stable so we gonna use those for clinical interpretation.
+
+### Weibull AFT Model with Cell Type as Covariate
+
+We now build a parametric regression model where **log survival time** is explained by **tumor cell type** using the AFT (log-linear) formulation.
+
+We model:
+$$
+\log(T_i) \sim \mathcal{N}(\mu_i, \sigma^2), \quad \mu_i = \beta_0 + \beta_1 X_{1i} + \beta_2 X_{2i} + \beta_3 X_{3i}
+$$
+
+Where:
+
+- $\beta_0$: baseline log-survival (e.g., for `large` cell type)
+- $\beta_j$: log-accelerated time effect of each cell type
+- $\sigma = 1/\kappa$, the Weibull shape parameter
+- The `celltype` factor is converted into **3 dummy variables** (baseline = `large`)
+
+$$
+\log(T_i) = \beta_0 + \beta_1 \cdot \text{(celltype = squamous)} + \beta_2 \cdot \text{(smallcell)} + \beta_3 \cdot \text{(adeno)} + \varepsilon_i, \quad \varepsilon_i \sim \text{Extreme Value}
+$$
+
+Interpretation is in terms of **time acceleration** (AFT), not hazards.
+
+```{r}
+# Set reference category for celltype
+veteran$celltype <- relevel(veteran$celltype, ref = "large")
+
+# Design matrix with intercept and 3 dummy vars
+X <- model.matrix(~ celltype, data = veteran)  # includes intercept
+
+weibull_data <- list(
+  N = nrow(veteran),
+  time = veteran$time,
+  isCens = veteran$status,  # 1 = event, 0 = censored
+  X = X,
+  K = ncol(X)
+)
+
+```
+
+```{r}
+cat("
+model {
+  for (i in 1:N) {
+    isCens[i] ~ dinterval(t[i], time[i])
+    t[i] ~ dweib(shape, lambda[i])
+
+    mu[i] <- inprod(beta[], X[i,])    # Linear predictor
+    lambda[i] <- exp(-mu[i])          # Scale reparameterization
+  }
+
+  # Priors
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.01)
+  }
+
+  shape ~ dgamma(1, 0.1)
+}
+", file = "weibull_aft_celltype.jags")
+
+```
+
+```{r}
+weibull_data$isCens <- veteran$status  # 1=event, 0=censored
+model <- jags.model("weibull_aft_celltype.jags", data = weibull_data, n.chains = 3, n.adapt = 1000)
+update(model, 1000)  # Burn-in
+samples <- coda.samples(model, variable.names = c("beta", "shape"), n.iter = 5000)
+summary(samples)
+
+```
+
+- **Intercept ($\beta_1$)** corresponds to the **baseline (large cell)** group's log-survival.  
+
+```{r}
+# Intercept ($\beta_1$) corresponds to the baseline (large cell) group's log-survival.  
+beta_1 = 5.6522
+print("beta_1")
+exp(beta_1)
+
+# $\beta_2$): Effect of `squamous` vs `large` 
+beta_2 = -3.8812
+print("beta_3")
+exp(beta_2)
+
+# $\beta_3$): Effect of `squamous` vs `large` 
+beta_3 = -3.4549
+print("beta_3")
+exp(beta_3)
+
+# $\beta_4$): Effect of `squamous` vs `large` 
+beta_4 = -3.5358
+print("beta_4")
+exp(beta_4)
+
+```
+- The **intercept** is high, indicating long survival for the reference group (large-cell tumors)
+- All other cell types (squamous, smallcell, adeno) have **negative coefficients**, meaning **shorter survival** compared to the `large` group. However, the **credible intervals are wide**, so we can't claim high certainty — though **the trend aligns** with Kaplan–Meier findings.
+
+- **`shape` < 1** (posterior mean ≈ 0.4): confirms **decreasing hazard over time** — early risk is higher (We can claim this cause also CI is below 1).
+
+---
+
+```{r}
+samples <- coda.samples(model, variable.names = c("beta", "shape"), n.iter = 5000)
+posterior_df <- as.data.frame(do.call(rbind, samples))
+
+# posterior samples
+#posterior_df <- as.data.frame(as.matrix(samples))
+
+X_celltype <- list(
+  large     = c(1, 0, 0, 0),  # reference
+  squamous  = c(1, 1, 0, 0),
+  smallcell = c(1, 0, 1, 0),
+  adeno     = c(1, 0, 0, 1)
+)
+#str(posterior_df)
+#colnames(posterior_df)
+#length(X_celltype[[1]])
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+
+# Create time grid
+time_grid <- seq(0, 600, length.out = 200)
+
+# Extract beta matrix and shape vector from posterior
+beta_mat <- as.matrix(posterior_df[, grep("^beta\$$", names(posterior_df))])
+#ncol(beta_mat)
+shape_vec <- posterior_df$shape
+
+# Check: number of betas should match length of each row_X
+stopifnot(ncol(beta_mat) == length(X_celltype[[1]]))
+
+# Compute survival curves by group
+surv_curves <- lapply(names(X_celltype), function(group) {
+  row_X <- X_celltype[[group]]  # design vector for the group
+
+  # Linear predictor (mu) for each posterior sample
+  mu <- beta_mat %*% row_X
+
+  # Weibull rate parameter (lambda) for AFT
+  lambda <- exp(-mu)
+
+  # Compute survival probabilities for each time in the grid
+  surv_mat <- matrix(nrow = nrow(beta_mat), ncol = length(time_grid))
+  for (j in seq_along(time_grid)) {
+    t <- time_grid[j]
+    surv_mat[, j] <- exp(- (lambda * t)^shape_vec)
+  }
+
+  # Compute posterior summary
+  surv_summary <- apply(surv_mat, 2, quantile, probs = c(0.025, 0.5, 0.975))
+
+  data.frame(
+    time = time_grid,
+    median = surv_summary[2, ],
+    lower = surv_summary[1, ],
+    upper = surv_summary[3, ],
+    group = group
+  )
+})
+
+# Combine all group results
+surv_plot_df <- do.call(rbind, surv_curves)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(surv_plot_df, aes(x = time, y = median, color = group, fill = group)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
+  labs(
+    title = "Posterior Weibull Survival Curves by Cell Type",
+    x = "Time (days)",
+    y = "Survival Probability",
+    color = "Cell Type",
+    fill = "Cell Type"
+  ) +
+  theme_minimal()
+
+```
+
+- Adeno patients exhibit the best prognosis, along with Large cell type, both with the highest survival probabilities throughout the time horizon.
+
+- Smallcell and squamous types have significantly lower survival curves, indicating more aggressive disease progression and shorter expected survival times.
+
+```{r}
+compute_median_surv <- function(X_row) {
+  mu <- beta_mat %*% X_row  # linear predictor (log-time)
+  median_surv <- (log(2))^(1 / shape_vec) * exp(mu)  # correct AFT form
+  return(median_surv)
+}
+
+posterior_medians <- lapply(X_celltype, compute_median_surv)
+
+median_summary <- lapply(posterior_medians, function(x) {
+  quantile(x, probs = c(0.025, 0.5, 0.975))
+})
+
+median_df <- do.call(rbind, median_summary) %>%
+  round(1) %>%
+  as.data.frame()
+median_df$celltype <- rownames(median_df)
+rownames(median_df) <- NULL
+
+knitr::kable(median_df, caption = "Posterior Median Survival Times by Celltype (Weibull AFT Model)")
+
+```
+
+Let's make a comparison with Kaplan-Meier findings of earlier:
+
+```{r}
+km_table <- data.frame(
+  celltype = c("squamous", "smallcell", "adeno", "large"),
+  KM_Median = c(118, 51, 51, 156),
+  KM_LCL = c(82, 25, 35, 105),
+  KM_UCL = c(314, 63, 92, 231)
+)
+
+weibull_table <- data.frame(
+  celltype = c("adeno", "large", "smallcell", "squamous"),
+  Post_Median = c(85.3, 33.0, 41.7, 82.7),
+  Post_LCL = c(1.0, 0.5, 1.6, 2.0),
+  Post_UCL = c(1717.1, 435.7, 724.7, 5442.8)
+)
+
+comparison_table <- merge(km_table, weibull_table, by = "celltype")
+comparison_table <- comparison_table[c("celltype", "KM_Median", "KM_LCL", "KM_UCL", 
+                                       "Post_Median", "Post_LCL", "Post_UCL")]
+
+knitr::kable(comparison_table, caption = "Kaplan–Meier vs Posterior Median Survival Times by Celltype")
+```
+By zooming we reveal meaningful differences that were previously masked by extreme posterior upper bounds. 
+
+```{r}
+plot_df <- comparison_table %>%
+  pivot_longer(cols = -celltype, names_to = "metric", values_to = "value") %>%
+  separate(metric, into = c("source", "stat"), sep = "_") %>%
+  pivot_wider(names_from = stat, values_from = value)
+
+ggplot(plot_df, aes(x = celltype, y = Median, color = source)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = LCL, ymax = UCL), 
+                position = position_dodge(width = 0.5), width = 0.3) +
+  labs(
+    title = "KM vs Posterior Weibull Median Survival Times",
+    y = "Median Survival (days)",
+    x = "Cell Type",
+    color = "Estimator"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+# Focused comparison up to 400 days
+ggplot(plot_df, aes(x = celltype, y = Median, color = source)) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  geom_errorbar(aes(ymin = LCL, ymax = UCL), 
+                position = position_dodge(width = 0.5), width = 0.3) +
+  scale_y_continuous(limits = c(0, 400)) +
+  labs(
+    title = "Zoomed KM vs Posterior Median Survival Times (0–400 days)",
+    y = "Median Survival (days)",
+    x = "Cell Type",
+    color = "Estimator"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+
+```{r}
+cat("
+model {
+  for (i in 1:N) {
+    isCens[i] ~ dinterval(t[i], time[i])
+    t[i] ~ dexp(lambda[i])
+    
+    mu[i] <- inprod(beta[], X[i,])
+    lambda[i] <- exp(-mu[i])  # AFT link
+  }
+
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.01)
+  }
+}
+", file = "exponential_aft_celltype.jags")
+```
+
+```{r}
+# You can reuse it
+exp_data <- weibull_data
+```
+
+```{r}
+exp_model <- jags.model("exponential_aft_celltype.jags", data = exp_data, n.chains = 3, n.adapt = 1000)
+update(exp_model, 1000)
+exp_samples <- coda.samples(exp_model, variable.names = c("beta"), n.iter = 5000)
+summary(exp_samples)
+```
+- **All effects are negative** → celltypes other than `large` have **shorter survival**.
+- BUT: All 95% intervals include zero → effects are not statistically strong.
+- **Exponentiated time ratios**:
+  - `squamous`: $e^{-0.90} \approx 0.41$$ ⇒ ~59% shorter survival
+  - `smallcell`: $e^{-1.28} \approx 0.28$$
+  - `adeno`: $e^{-0.41} \approx 0.66$$
+
+**Exponential** Assumes constant hazard over time, it might be Simpler, but may underfit skewed surviva
+
+```{r}
+# Simulate from posterior predictive distribution
+n_sim <- 500
+posterior_mat <- as.matrix(exp_samples)
+
+# Pick n_sim draws from posterior
+rows <- sample(1:nrow(posterior_mat), n_sim)
+
+# Simulate survival times
+X_groups <- X_celltype  # reuse from before
+sim_times <- numeric(n_sim)
+
+for (i in 1:n_sim) {
+  beta <- posterior_mat[rows[i], 1:4]
+  mu <- X_groups$large %*% beta  # baseline group
+  lambda <- exp(-mu)
+  sim_times[i] <- rexp(1, rate = lambda)
+}
+
+# Plot
+hist(sim_times, breaks = 40, col = "lightblue",
+     main = "Posterior Predictive Survival Times (Exponential AFT)",
+     xlab = "Simulated time (days)")
+
+```
+
+```{r}
+cat("
+model {
+  for (i in 1:N) {
+    log.h[i] <- log(shape) + (shape - 1) * log(t[i]) - shape * log(scale[i])
+    log.S[i] <- -pow(t[i] / scale[i], shape)
+
+    loglik[i] <- status[i] * (log.h[i] + log.S[i]) + (1 - status[i]) * log.S[i]
+    zeros[i] ~ dpois(-loglik[i])
+
+    log(scale[i]) <- beta[1] + beta[2] * cell2[i] + beta[3] * cell3[i] + beta[4] * cell4[i]
+  }
+
+  for (j in 1:4) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+
+  shape ~ dunif(0.001, 10)
+}
+", file = "weibull_no_dinterval.jags")
+
+```
+
+
+```{r}
+# Convert categorical variable into dummy indicators
+veteran$celltype <- relevel(veteran$celltype, ref = "large")
+cell_dummies <- model.matrix(~ celltype, data = veteran)[, -1]
+
+weibull_data <- list(
+  N = nrow(veteran),
+  t = veteran$time,
+  status = veteran$status,
+  zeros = rep(0, nrow(veteran)),
+  cell2 = cell_dummies[, "celltypesmallcell"],
+  cell3 = cell_dummies[, "celltypesquamous"],
+  cell4 = cell_dummies[, "celltypeadeno"]
+)
+```
+
+```{r}
+inits <- function() {
+  list(
+    beta = rnorm(4, 0, 0.1),  # small random values
+    shape = runif(1, 0.5, 2)  # keep shape > 0
+  )
+}
+model <- jags.model("weibull_no_dinterval.jags", 
+                    data = weibull_data, 
+                    inits = inits,  # This ensures log(scale[i]) remains defined early in sampling.
+                    n.chains = 3)
+
+```
+
+```{r}
+# Sample from beta, shape, and loglik (for DIC)
+samples <- coda.samples(model, variable.names = c("beta", "shape", "loglik"), n.iter = 5000)
+
+# Convert to matrix
+samples_mat <- as.matrix(samples)
+
+# Extract loglik matrix: 5000 rows × N cols
+loglik_matrix <- samples_mat[, grep("loglik\$$", colnames(samples_mat))]
+
+# Compute mean deviance (D̄)
+D_bar <- -2 * sum(colMeans(loglik_matrix))
+
+# Compute deviance at posterior means (D̂)
+# We need the posterior mean of loglik[i]
+loglik_mean <- colMeans(loglik_matrix)
+D_hat <- -2 * sum(loglik_mean)
+
+# Effective number of parameters
+pD <- D_bar - D_hat
+
+# DIC
+DIC <- D_hat + 2 * pD
+
+# Show results
+list(D_bar = D_bar, D_hat = D_hat, pD = pD, DIC = DIC)
+
+```
+
+```{r}
+# Extract samples matrix
+samples_mat <- as.matrix(samples)
+
+# Example: Posterior density of beta[2]
+plot(density(samples_mat[, "beta[2]"]), main = "Posterior of β₂", xlab = "β₂")
+abline(v = mean(samples_mat[, "beta[2]"]), col = "blue", lwd = 2)
+
+```
+
+

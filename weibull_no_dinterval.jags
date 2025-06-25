@@ -1,0 +1,18 @@
+
+model {
+  for (i in 1:N) {
+    log.h[i] <- log(shape) + (shape - 1) * log(t[i]) - shape * log(scale[i])
+    log.S[i] <- -pow(t[i] / scale[i], shape)
+
+    loglik[i] <- status[i] * (log.h[i] + log.S[i]) + (1 - status[i]) * log.S[i]
+    zeros[i] ~ dpois(-loglik[i])
+
+    log(scale[i]) <- beta[1] + beta[2] * cell2[i] + beta[3] * cell3[i] + beta[4] * cell4[i]
+  }
+
+  for (j in 1:4) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+
+  shape ~ dunif(0.001, 10)
+}

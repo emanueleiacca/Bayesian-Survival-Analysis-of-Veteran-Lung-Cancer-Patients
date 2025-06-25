@@ -1,0 +1,12 @@
+
+model {
+  for (i in 1:N) {
+    isCensored[i] ~ dinterval(t[i], time[i])
+    t[i] ~ dexp(lambda)
+
+    # Only compute log-likelihood if uncensored
+    loglik[i] <- (1 - isCensored[i]) * logdensity.dexp(time[i], lambda)
+  }
+
+  lambda ~ dgamma(0.001, 0.001)
+}

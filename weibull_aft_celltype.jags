@@ -1,0 +1,16 @@
+
+model {
+  for (i in 1:N) {
+    isCens[i] ~ dinterval(t[i], time[i])
+    t[i] ~ dweib(shape, lambda[i])
+    
+    mu[i] = inprod(beta[], X[i,])
+    lambda[i] = exp(mu[i])
+  }
+
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.01)
+  }
+
+  shape ~ dgamma(1, 0.1)
+}

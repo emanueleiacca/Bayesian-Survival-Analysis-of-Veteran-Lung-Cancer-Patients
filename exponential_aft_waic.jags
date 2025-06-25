@@ -1,0 +1,25 @@
+
+model {
+  for (i in 1:N) {
+    # AFT‐style linear predictor
+    eta[i]      <- inprod(beta[], X[i,])
+    lambda[i]   <- exp(-eta[i])
+
+    # Censoring
+    isCensored[i] ~ dinterval(t[i], time[i])
+    t[i]          ~ dexp(lambda[i])
+
+    # pointwise log‐likelihood
+    loglik[i]    <- 
+      isCensored[i] * (   # if censored
+         log(1 - exp(-lambda[i] * time[i]))
+      ) +
+      (1 - isCensored[i]) * (  # if event
+         dexp(t[i], lambda[i], log=TRUE)
+      )
+  }
+
+  for (j in 1:K) {
+    beta[j] ~ dnorm(0, 0.01)
+  }
+}

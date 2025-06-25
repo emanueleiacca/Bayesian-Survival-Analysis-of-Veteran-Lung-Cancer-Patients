@@ -1,0 +1,15 @@
+
+model {
+  for (i in 1:N) {
+    y[i] ~ dnorm(mu[i], tau)
+    mu[i] <- inprod(beta[], X[i, ])
+  }
+
+  for (j in 1:P) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+
+  # Precision from shape
+  tau <- pow(1 / shape, 2)
+  shape ~ dunif(0.1, 10)
+}
